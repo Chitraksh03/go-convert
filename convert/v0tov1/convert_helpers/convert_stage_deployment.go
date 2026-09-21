@@ -238,10 +238,11 @@ func ConvertEnvironment(src *v0.Environment, ctx *StageConversionContext) *v1.En
 	}
 
 	// Resolve deploy-to from both singular and plural infra definitions
-	deployTo := resolveEnvironmentDeployTo(src)
+	deployTo, allInfra := resolveEnvironmentDeployTo(src)
 
 	item := &v1.EnvironmentItem{
 		Id:        src.EnvironmentRef,
+		AllInfra:  allInfra,
 		DeployTo:  deployTo,
 		Overrides: buildEnvironmentOverrides(src.EnvironmentInputs, src.ServiceOverrideInputs),
 	}
@@ -411,7 +412,7 @@ func ConvertEnvironments(src *v0.Environments, ctx *StageConversionContext) *v1.
 			}
 		}
 		if len(item.Filters) == 0 {
-			item.DeployTo = resolveEnvironmentDeployTo(env)
+			item.DeployTo, item.AllInfra = resolveEnvironmentDeployTo(env)
 		}
 		items = append(items, item)
 	}
@@ -457,12 +458,9 @@ func ConvertEnvironmentGroup(src *v0.EnvironmentGroup, ctx *StageConversionConte
 	if src.Environments != nil {
 		if expr, ok := src.Environments.AsString(); ok && expr != "" {
 			// Expression for environments - pass through
-			groupConfig := map[string]interface{}{
-				"id": src.EnvGroupRef,
-			}
 			return &v1.EnvironmentRef{
 				Parallel: parallel,
-				Group:    groupConfig,
+				Group:    newEnvironmentGroupConfig(src),
 			}
 		}
 	}
@@ -470,12 +468,9 @@ func ConvertEnvironmentGroup(src *v0.EnvironmentGroup, ctx *StageConversionConte
 	// Case: filters is an expression (e.g., <+input>)
 	if src.Filters != nil {
 		if expr, ok := src.Filters.AsString(); ok && expr != "" {
-			groupConfig := map[string]interface{}{
-				"id": src.EnvGroupRef,
-			}
 			return &v1.EnvironmentRef{
 				Parallel: parallel,
-				Group:    groupConfig,
+				Group:    newEnvironmentGroupConfig(src),
 			}
 		}
 	}
@@ -485,11 +480,8 @@ func ConvertEnvironmentGroup(src *v0.EnvironmentGroup, ctx *StageConversionConte
 		// Check for filters
 		if src.Filters != nil {
 			if filters, ok := src.Filters.AsStruct(); ok && len(filters) > 0 {
-				v1Filters := ConvertEnvironmentFilters(filters)
-				groupConfig := map[string]interface{}{
-					"id":      src.EnvGroupRef,
-					"filters": v1Filters,
-				}
+				groupConfig := newEnvironmentGroupConfig(src)
+				groupConfig["filters"] = ConvertEnvironmentFilters(filters)
 				return &v1.EnvironmentRef{
 					Parallel: parallel,
 					Group:    groupConfig,
@@ -500,7 +492,7 @@ func ConvertEnvironmentGroup(src *v0.EnvironmentGroup, ctx *StageConversionConte
 		// Simple group reference format
 		return &v1.EnvironmentRef{
 			Parallel: parallel,
-			Group:    map[string]interface{}{"id": src.EnvGroupRef},
+			Group:    newEnvironmentGroupConfig(src),
 		}
 	}
 
@@ -510,10 +502,8 @@ func ConvertEnvironmentGroup(src *v0.EnvironmentGroup, ctx *StageConversionConte
 		if ok && len(envItems) > 0 {
 			items := convertEnvironmentGroupEnvItems(envItems)
 			if len(items) > 0 {
-				groupConfig := map[string]interface{}{
-					"id":    src.EnvGroupRef,
-					"items": items,
-				}
+				groupConfig := newEnvironmentGroupConfig(src)
+				groupConfig["items"] = items
 				return &v1.EnvironmentRef{
 					Parallel: parallel,
 					Group:    groupConfig,
@@ -525,6 +515,28 @@ func ConvertEnvironmentGroup(src *v0.EnvironmentGroup, ctx *StageConversionConte
 	return nil
 }
 
+// newEnvironmentGroupConfig builds the v1 group config for a v0 EnvironmentGroup.
+// The all-env marker is set when the group targets every environment in it.
+func newEnvironmentGroupConfig(src *v0.EnvironmentGroup) map[string]interface{} {
+	groupConfig := map[string]interface{}{
+		"id": src.EnvGroupRef,
+	}
+	if isDeployToAllEnv(src.DeployToAll) {
+		groupConfig["all-env"] = true
+	}
+	return groupConfig
+}
+
+// isDeployToAllEnv reports whether a v0 deployToAll targets every environment.
+// Returns false for nil and for expression values, which are not honoured by the marker.
+func isDeployToAllEnv(deployToAll *flexible.Field[bool]) bool {
+	if deployToAll == nil {
+		return false
+	}
+	val, ok := deployToAll.AsStruct()
+	return ok && val
+}
+
 // convertEnvironmentGroupEnvItems converts v0 Environment array to v1 EnvironmentItem array
 func convertEnvironmentGroupEnvItems(envItems []*v0.Environment) []*v1.EnvironmentItem {
 	items := make([]*v1.EnvironmentItem, 0, len(envItems))
@@ -533,9 +545,10 @@ func convertEnvironmentGroupEnvItems(envItems []*v0.Environment) []*v1.Environme
 			continue
 		}
 
-		deployTo := resolveEnvironmentDeployTo(env)
+		deployTo, allInfra := resolveEnvironmentDeployTo(env)
 		items = append(items, &v1.EnvironmentItem{
 			Id:        env.EnvironmentRef,
+			AllInfra:  allInfra,
 			DeployTo:  deployTo,
 			Overrides: buildEnvironmentOverrides(env.EnvironmentInputs, env.ServiceOverrideInputs),
 		})
@@ -553,11 +566,12 @@ func ConvertDeploymentInfrastructure(src *v0.DeploymentInfrastructure) *v1.Envir
 	// Create environment item with the environmentRef from infrastructure
 	envItem := &v1.EnvironmentItem{
 		Id:       src.EnvironmentRef,
-		DeployTo: "all", // Default to all infrastructures
+		AllInfra: true, // Default to all infrastructures
 	}
 
 	// If infrastructure definition is specified, use its identifier
 	if src.InfrastructureDefinition.Identifier != "" {
+		envItem.AllInfra = false
 		envItem.DeployTo = src.InfrastructureDefinition.Identifier
 	}
 
@@ -566,9 +580,10 @@ func ConvertDeploymentInfrastructure(src *v0.DeploymentInfrastructure) *v1.Envir
 	}
 }
 
-// resolveEnvironmentDeployTo resolves the deploy-to value for a v0 Environment.
+// resolveEnvironmentDeployTo resolves the deploy-to value and the all-infra marker
+// for a v0 Environment.
 // Checks both singular infrastructureDefinition and plural infrastructureDefinitions.
-func resolveEnvironmentDeployTo(env *v0.Environment) interface{} {
+func resolveEnvironmentDeployTo(env *v0.Environment) (interface{}, bool) {
 	infraDefs := collectInfraDefinitions(env)
 	return resolveDeployTo(env.DeployToAll, infraDefs)
 }
@@ -616,13 +631,14 @@ func hasValidInfraInputs(inputs interface{}) bool {
 	return true
 }
 
-// resolveDeployTo determines the deploy-to value based on DeployToAll and infrastructure definitions.
-// - If DeployToAll is a boolean true → "all"
+// resolveDeployTo determines the deploy-to value and the all-infra marker based on
+// DeployToAll and infrastructure definitions.
+// - If DeployToAll is a boolean true → sets the all-infra marker, no deploy-to value
 // - If DeployToAll is <+input> → returns the infra value only (single string or list)
-// - If DeployToAll is any other expression → builds ternary: <+ <+expr> ? "all" : "infraValue" >
+// - If DeployToAll is any other expression → returns the infra value and logs a warning
 // - If DeployToAll is nil/false → returns the infra value
 // - If infrastructure has inputs, returns DeployToItem with overlay
-func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Field[[]*v0.InfrastructureDefinition]) interface{} {
+func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Field[[]*v0.InfrastructureDefinition]) (interface{}, bool) {
 	// Compute infra value from infrastructure definitions
 	var infraValue interface{}
 	if infraDefs != nil {
@@ -677,50 +693,36 @@ func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Fiel
 	}
 
 	if deployToAll == nil {
-		return infraValue
+		return infraValue, false
 	}
 
 	// Boolean value
 	if val, ok := deployToAll.AsStruct(); ok {
 		if val {
-			return "all"
+			// The marker alone targets every infrastructure; a resolved deploy-to
+			// sibling would take precedence over it and pin the environment to the
+			// infrastructures listed at conversion time.
+			return nil, true
 		}
-		return infraValue
+		return infraValue, false
 	}
 
 	// Expression value
 	if expr, ok := deployToAll.AsString(); ok {
 		if expr == "<+input>" {
 			// <+input> means deploy-to is the infra only
-			return infraValue
+			return infraValue, false
 		}
-		// Other expression: build ternary
-		// <+ <+originalExpr> ? "all" : "infraFromYaml">
-		infraStr := formatInfraForExpression(infraValue)
-		return fmt.Sprintf("<+ %s ? \"all\" : %s>", expr, infraStr)
+		// Other expression: the marker only honours a literal true, so the choice
+		// between all infrastructures and the listed ones cannot be deferred to
+		// runtime. Fall back to the listed infrastructures.
+		messagelog.GetMessageLogger().LogWarning(
+			"UNSUPPORTED_EXPRESSION",
+			fmt.Sprintf("deployToAll contains unsupported expression %q; falling back to the listed infrastructures", expr),
+			messagelog.WithContext(map[string]string{"expression": expr, "field": "deployToAll"}),
+		)
+		return infraValue, false
 	}
 
-	return infraValue
-}
-
-// formatInfraForExpression formats infrastructure value for use in ternary expressions.
-// Single string → "infraName"
-// List → ["infra1","infra2",...]
-func formatInfraForExpression(infraValue interface{}) string {
-	switch v := infraValue.(type) {
-	case string:
-		return fmt.Sprintf("%q", v)
-	case []string:
-		result := "["
-		for i, s := range v {
-			if i > 0 {
-				result += ","
-			}
-			result += fmt.Sprintf("%q", s)
-		}
-		result += "]"
-		return result
-	default:
-		return "\"\""
-	}
+	return infraValue, false
 }

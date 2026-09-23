@@ -25,15 +25,10 @@ import (
 // v0 expressed "deploy everywhere" with a deployToAll flag. v1 expresses it with boolean
 // markers, and the backend only honours a literal true, so an expression cannot defer the
 // choice to runtime:
-//   - v0 deployToAll: true        -> v1 all-infra: true, emitted alongside deploy-to
+//   - v0 deployToAll: true        -> v1 all-infra: true alongside deploy-to
 //   - v0 deployToAll: false       -> v1 deploy-to only
 //   - v0 deployToAll unspecified  -> v1 deploy-to only
 //   - v0 deployToAll: <expression> -> v1 deploy-to only (falls back to the listed infras)
-//
-// The marker never replaces the infrastructure sibling: v0's non-GitOps runtime ignores
-// deployToAll and fans out over infrastructureDefinitions, so dropping the sibling would
-// widen the deployment. A resolved deploy-to wins over the marker in the v1 backend, which
-// leaves the marker inert exactly as deployToAll was.
 //
 // At group level the same flag maps to all-env: true, which is emitted alongside items so
 // the per-environment config authored in v0 is not lost.

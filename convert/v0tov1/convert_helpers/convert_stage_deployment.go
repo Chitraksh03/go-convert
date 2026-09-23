@@ -633,7 +633,7 @@ func hasValidInfraInputs(inputs interface{}) bool {
 
 // resolveDeployTo determines the deploy-to value and the all-infra marker based on
 // DeployToAll and infrastructure definitions.
-// - If DeployToAll is a boolean true → sets the all-infra marker, no deploy-to value
+// - If DeployToAll is a boolean true → sets the all-infra marker alongside the infra value
 // - If DeployToAll is <+input> → returns the infra value only (single string or list)
 // - If DeployToAll is any other expression → returns the infra value and logs a warning
 // - If DeployToAll is nil/false → returns the infra value
@@ -699,13 +699,8 @@ func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Fiel
 	// Boolean value
 	if val, ok := deployToAll.AsStruct(); ok {
 		if val {
-			// Emit the marker alongside whatever infrastructure sibling v0 carried. In v0 the
-			// non-GitOps runtime ignores deployToAll entirely and fans out over
-			// infrastructureDefinitions, so discarding the sibling here would widen the
-			// deployment from the listed infrastructures to every infrastructure in the
-			// environment. Keeping both reproduces v0: deploy-to takes precedence over the
-			// marker in the v1 backend, leaving the marker inert exactly as deployToAll was.
-			// This also matches what the UI itself serializes for an all-infra item.
+			// v0's non-GitOps runtime ignores deployToAll and deploys to the listed
+			// infrastructures, which the deploy-to sibling preserves in v1.
 			return infraValue, true
 		}
 		return infraValue, false

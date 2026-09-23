@@ -25,10 +25,15 @@ import (
 // v0 expressed "deploy everywhere" with a deployToAll flag. v1 expresses it with boolean
 // markers, and the backend only honours a literal true, so an expression cannot defer the
 // choice to runtime:
-//   - v0 deployToAll: true        -> v1 all-infra: true, no deploy-to
+//   - v0 deployToAll: true        -> v1 all-infra: true, emitted alongside deploy-to
 //   - v0 deployToAll: false       -> v1 deploy-to only
 //   - v0 deployToAll unspecified  -> v1 deploy-to only
 //   - v0 deployToAll: <expression> -> v1 deploy-to only (falls back to the listed infras)
+//
+// The marker never replaces the infrastructure sibling: v0's non-GitOps runtime ignores
+// deployToAll and fans out over infrastructureDefinitions, so dropping the sibling would
+// widen the deployment. A resolved deploy-to wins over the marker in the v1 backend, which
+// leaves the marker inert exactly as deployToAll was.
 //
 // At group level the same flag maps to all-env: true, which is emitted alongside items so
 // the per-environment config authored in v0 is not lost.
@@ -58,10 +63,17 @@ func TestResolveDeployTo_AllInfraMarker(t *testing.T) {
 		wantAllInfra bool
 	}{
 		{
-			name:         "deployToAll true -> marker only, infra list discarded",
+			name:         "deployToAll true -> marker alongside the infra list",
 			deployToAll:  &flexible.Field[bool]{Value: true},
 			infraDefs:    infraDefs("infra1", "infra2"),
-			wantDeployTo: nil,
+			wantDeployTo: []string{"infra1", "infra2"},
+			wantAllInfra: true,
+		},
+		{
+			name:         "deployToAll true with a single infra -> marker alongside the infra",
+			deployToAll:  &flexible.Field[bool]{Value: true},
+			infraDefs:    infraDefs("infra1"),
+			wantDeployTo: "infra1",
 			wantAllInfra: true,
 		},
 		{
@@ -122,9 +134,9 @@ func TestConvertEnvironment_AllInfraMarker(t *testing.T) {
 		wantAllInfra bool
 	}{
 		{
-			name:         "deployToAll true -> marker only",
+			name:         "deployToAll true -> marker alongside deploy-to",
 			deployToAll:  &flexible.Field[bool]{Value: true},
-			wantDeployTo: nil,
+			wantDeployTo: []string{"infra1", "infra2"},
 			wantAllInfra: true,
 		},
 		{

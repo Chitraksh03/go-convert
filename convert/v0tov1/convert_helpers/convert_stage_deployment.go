@@ -699,10 +699,14 @@ func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Fiel
 	// Boolean value
 	if val, ok := deployToAll.AsStruct(); ok {
 		if val {
-			// The marker alone targets every infrastructure; a resolved deploy-to
-			// sibling would take precedence over it and pin the environment to the
-			// infrastructures listed at conversion time.
-			return nil, true
+			// Emit the marker alongside whatever infrastructure sibling v0 carried. In v0 the
+			// non-GitOps runtime ignores deployToAll entirely and fans out over
+			// infrastructureDefinitions, so discarding the sibling here would widen the
+			// deployment from the listed infrastructures to every infrastructure in the
+			// environment. Keeping both reproduces v0: deploy-to takes precedence over the
+			// marker in the v1 backend, leaving the marker inert exactly as deployToAll was.
+			// This also matches what the UI itself serializes for an all-infra item.
+			return infraValue, true
 		}
 		return infraValue, false
 	}

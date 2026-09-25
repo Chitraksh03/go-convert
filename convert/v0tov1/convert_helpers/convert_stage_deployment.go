@@ -721,15 +721,6 @@ func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Fiel
 	// at execution" into "not all". The deploy-to sibling is kept alongside it, so the
 	// infrastructures authored in v0 survive whichever way the expression resolves.
 	if expr, ok := deployToAll.AsString(); ok {
-		if expr != "<+input>" {
-			// Unlike <+input>, an arbitrary expression cannot be checked here - whether it
-			// yields a boolean is only known at execution.
-			messagelog.GetMessageLogger().LogWarning(
-				"UNSUPPORTED_EXPRESSION",
-				fmt.Sprintf("deployToAll contains expression %q; carried across as all-infra and must resolve to a boolean at runtime", expr),
-				messagelog.WithContext(map[string]string{"expression": expr, "field": "deployToAll"}),
-			)
-		}
 		return infraValue, expr
 	}
 

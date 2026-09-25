@@ -30,8 +30,7 @@ import (
 //   - v0 deployToAll: false        -> v1 deploy-to only
 //   - v0 deployToAll unspecified   -> v1 deploy-to only
 //   - v0 deployToAll: <+input>     -> v1 all-infra: <+input> alongside deploy-to
-//   - v0 deployToAll: <expression> -> v1 all-infra: <expression> alongside deploy-to, plus a
-//     warning, since whether it yields a boolean is only known at execution
+//   - v0 deployToAll: <expression> -> v1 all-infra: <expression> alongside deploy-to
 //
 // The marker is nil rather than false when absent, so no spurious all-infra: false is emitted.
 // At group level the same flag maps to all-env, which is emitted alongside items so the
@@ -397,33 +396,39 @@ func TestConvertEnvironmentGroup_AllEnvMarkerWithoutEnvironments(t *testing.T) {
 	}
 }
 
-// Only an arbitrary expression warns: a literal and a runtime input are both known to be
-// valid here, whereas whether an expression yields a boolean is only known at execution.
-func TestResolveDeployTo_AllInfraMarkerWarning(t *testing.T) {
+// Nothing here warns. UNSUPPORTED_EXPRESSION means the conversion was lossy everywhere else
+// it is used - services.values and environments.values skip conversion outright - whereas an
+// expression is carried across unchanged and is a value v1's all-infra accepts.
+func TestResolveDeployTo_AllInfraMarkerNoWarning(t *testing.T) {
 	tests := []struct {
 		name        string
 		deployToAll *flexible.Field[bool]
-		wantWarning bool
+		infraDefs   *flexible.Field[[]*v0.InfrastructureDefinition]
 	}{
 		{
-			name:        "other expression -> warning",
+			name:        "other expression with an infra list",
 			deployToAll: exprField("<+pipeline.variables.everywhere>"),
-			wantWarning: true,
+			infraDefs:   infraDefs("infra1", "infra2"),
 		},
 		{
-			name:        "<+input> -> no warning",
+			name:        "other expression with no infra list",
+			deployToAll: exprField("<+pipeline.variables.everywhere>"),
+			infraDefs:   nil,
+		},
+		{
+			name:        "<+input>",
 			deployToAll: exprField("<+input>"),
-			wantWarning: false,
+			infraDefs:   infraDefs("infra1", "infra2"),
 		},
 		{
-			name:        "deployToAll true -> no warning",
+			name:        "deployToAll true",
 			deployToAll: &flexible.Field[bool]{Value: true},
-			wantWarning: false,
+			infraDefs:   infraDefs("infra1", "infra2"),
 		},
 		{
-			name:        "deployToAll false -> no warning",
+			name:        "deployToAll false",
 			deployToAll: &flexible.Field[bool]{Value: false},
-			wantWarning: false,
+			infraDefs:   infraDefs("infra1", "infra2"),
 		},
 	}
 
@@ -435,28 +440,16 @@ func TestResolveDeployTo_AllInfraMarkerWarning(t *testing.T) {
 			logger.Enable("")
 			logger.SetCurrentFile("pipeline.yaml")
 
-			resolveDeployTo(tt.deployToAll, infraDefs("infra1", "infra2"))
+			resolveDeployTo(tt.deployToAll, tt.infraDefs)
 
-			var warnings []messagelog.Message
 			if fileLog := logger.GetFileLog("pipeline.yaml"); fileLog != nil {
-				for _, m := range fileLog.Messages {
-					if m.Code == "UNSUPPORTED_EXPRESSION" {
-						warnings = append(warnings, m)
-					}
-				}
-			}
-			if tt.wantWarning != (len(warnings) > 0) {
-				t.Fatalf("expected warning=%v, got %#v", tt.wantWarning, warnings)
-			}
-			if tt.wantWarning && warnings[0].Severity != messagelog.SeverityWarning {
-				t.Fatalf("expected a WARNING severity, got %q", warnings[0].Severity)
+				t.Fatalf("expected no messages, got %#v", fileLog.Messages)
 			}
 		})
 	}
 }
 
-// The group path carries the marker across without warning: unlike the environment path it
-// has no infrastructure list whose fate the expression decides.
+// The group path carries the marker across without warning, for the same reason.
 func TestResolveAllEnvMarker_NoWarning(t *testing.T) {
 	messagelog.ResetMessageLogger()
 	defer messagelog.ResetMessageLogger()

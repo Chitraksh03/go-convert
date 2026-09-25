@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	v0 "github.com/drone/go-convert/convert/harness/yaml"
+	"github.com/drone/go-convert/convert/v0tov1/messagelog"
 	"github.com/drone/go-convert/internal/flexible"
 )
 
@@ -43,6 +44,12 @@ func infraDefs(ids ...string) *flexible.Field[[]*v0.InfrastructureDefinition] {
 	}
 	field := &flexible.Field[[]*v0.InfrastructureDefinition]{}
 	field.Set(defs)
+	return field
+}
+
+func infraDefsExpr(expr string) *flexible.Field[[]*v0.InfrastructureDefinition] {
+	field := &flexible.Field[[]*v0.InfrastructureDefinition]{}
+	field.SetExpression(expr)
 	return field
 }
 
@@ -107,6 +114,34 @@ func TestResolveDeployTo_AllInfraMarker(t *testing.T) {
 			deployToAll:  exprField("<+pipeline.variables.everywhere>"),
 			infraDefs:    infraDefs("infra1"),
 			wantDeployTo: "infra1",
+			wantAllInfra: "<+pipeline.variables.everywhere>",
+		},
+		{
+			name:         "deployToAll other expression -> marker carried across alongside the infra list",
+			deployToAll:  exprField("<+pipeline.variables.everywhere>"),
+			infraDefs:    infraDefs("infra1", "infra2"),
+			wantDeployTo: []string{"infra1", "infra2"},
+			wantAllInfra: "<+pipeline.variables.everywhere>",
+		},
+		{
+			name:         "deployToAll true with an expression infra list -> marker alongside the expression",
+			deployToAll:  &flexible.Field[bool]{Value: true},
+			infraDefs:    infraDefsExpr("<+input>"),
+			wantDeployTo: "<+input>",
+			wantAllInfra: true,
+		},
+		{
+			name:         "deployToAll <+input> with no infra list -> marker only",
+			deployToAll:  exprField("<+input>"),
+			infraDefs:    nil,
+			wantDeployTo: nil,
+			wantAllInfra: "<+input>",
+		},
+		{
+			name:         "deployToAll other expression with no infra list -> marker only",
+			deployToAll:  exprField("<+pipeline.variables.everywhere>"),
+			infraDefs:    nil,
+			wantDeployTo: nil,
 			wantAllInfra: "<+pipeline.variables.everywhere>",
 		},
 	}
@@ -318,17 +353,121 @@ func TestConvertEnvironmentGroup_AllEnvMarker(t *testing.T) {
 // A group ref with no environments still carries the marker, so the server resolves the
 // full environment list at execution time.
 func TestConvertEnvironmentGroup_AllEnvMarkerWithoutEnvironments(t *testing.T) {
-	src := &v0.EnvironmentGroup{
-		EnvGroupRef: "group1",
-		DeployToAll: &flexible.Field[bool]{Value: true},
+	tests := []struct {
+		name        string
+		deployToAll *flexible.Field[bool]
+		want        map[string]interface{}
+	}{
+		{
+			name:        "group deployToAll true -> marker only",
+			deployToAll: &flexible.Field[bool]{Value: true},
+			want:        map[string]interface{}{"id": "group1", "all-env": true},
+		},
+		{
+			name:        "group deployToAll <+input> -> marker only",
+			deployToAll: exprField("<+input>"),
+			want:        map[string]interface{}{"id": "group1", "all-env": "<+input>"},
+		},
+		{
+			name:        "group deployToAll other expression -> marker only",
+			deployToAll: exprField("<+pipeline.variables.everywhere>"),
+			want:        map[string]interface{}{"id": "group1", "all-env": "<+pipeline.variables.everywhere>"},
+		},
+		{
+			name:        "group deployToAll false -> no marker",
+			deployToAll: &flexible.Field[bool]{Value: false},
+			want:        map[string]interface{}{"id": "group1"},
+		},
 	}
-	got := ConvertEnvironmentGroup(src, NewStageConversionContext())
-	if got == nil {
-		t.Fatalf("expected an EnvironmentRef, got nil")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &v0.EnvironmentGroup{
+				EnvGroupRef: "group1",
+				DeployToAll: tt.deployToAll,
+			}
+			got := ConvertEnvironmentGroup(src, NewStageConversionContext())
+			if got == nil {
+				t.Fatalf("expected an EnvironmentRef, got nil")
+			}
+			if !reflect.DeepEqual(got.Group, tt.want) {
+				t.Fatalf("expected group=%#v, got group=%#v", tt.want, got.Group)
+			}
+		})
 	}
-	want := map[string]interface{}{"id": "group1", "all-env": true}
-	if !reflect.DeepEqual(got.Group, want) {
-		t.Fatalf("expected group=%#v, got group=%#v", want, got.Group)
+}
+
+// Only an arbitrary expression warns: a literal and a runtime input are both known to be
+// valid here, whereas whether an expression yields a boolean is only known at execution.
+func TestResolveDeployTo_AllInfraMarkerWarning(t *testing.T) {
+	tests := []struct {
+		name        string
+		deployToAll *flexible.Field[bool]
+		wantWarning bool
+	}{
+		{
+			name:        "other expression -> warning",
+			deployToAll: exprField("<+pipeline.variables.everywhere>"),
+			wantWarning: true,
+		},
+		{
+			name:        "<+input> -> no warning",
+			deployToAll: exprField("<+input>"),
+			wantWarning: false,
+		},
+		{
+			name:        "deployToAll true -> no warning",
+			deployToAll: &flexible.Field[bool]{Value: true},
+			wantWarning: false,
+		},
+		{
+			name:        "deployToAll false -> no warning",
+			deployToAll: &flexible.Field[bool]{Value: false},
+			wantWarning: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messagelog.ResetMessageLogger()
+			defer messagelog.ResetMessageLogger()
+			logger := messagelog.GetMessageLogger()
+			logger.Enable("")
+			logger.SetCurrentFile("pipeline.yaml")
+
+			resolveDeployTo(tt.deployToAll, infraDefs("infra1", "infra2"))
+
+			var warnings []messagelog.Message
+			if fileLog := logger.GetFileLog("pipeline.yaml"); fileLog != nil {
+				for _, m := range fileLog.Messages {
+					if m.Code == "UNSUPPORTED_EXPRESSION" {
+						warnings = append(warnings, m)
+					}
+				}
+			}
+			if tt.wantWarning != (len(warnings) > 0) {
+				t.Fatalf("expected warning=%v, got %#v", tt.wantWarning, warnings)
+			}
+			if tt.wantWarning && warnings[0].Severity != messagelog.SeverityWarning {
+				t.Fatalf("expected a WARNING severity, got %q", warnings[0].Severity)
+			}
+		})
+	}
+}
+
+// The group path carries the marker across without warning: unlike the environment path it
+// has no infrastructure list whose fate the expression decides.
+func TestResolveAllEnvMarker_NoWarning(t *testing.T) {
+	messagelog.ResetMessageLogger()
+	defer messagelog.ResetMessageLogger()
+	logger := messagelog.GetMessageLogger()
+	logger.Enable("")
+	logger.SetCurrentFile("pipeline.yaml")
+
+	resolveAllEnvMarker(exprField("<+pipeline.variables.everywhere>"))
+
+	if fileLog := logger.GetFileLog("pipeline.yaml"); fileLog != nil {
+		t.Fatalf("expected no messages, got %#v", fileLog.Messages)
 	}
 }
 

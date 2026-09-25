@@ -521,20 +521,29 @@ func newEnvironmentGroupConfig(src *v0.EnvironmentGroup) map[string]interface{} 
 	groupConfig := map[string]interface{}{
 		"id": src.EnvGroupRef,
 	}
-	if isDeployToAllEnv(src.DeployToAll) {
-		groupConfig["all-env"] = true
+	if marker := resolveAllEnvMarker(src.DeployToAll); marker != nil {
+		groupConfig["all-env"] = marker
 	}
 	return groupConfig
 }
 
-// isDeployToAllEnv reports whether a v0 deployToAll targets every environment.
-// Returns false for nil and for expression values, which are not honoured by the marker.
-func isDeployToAllEnv(deployToAll *flexible.Field[bool]) bool {
+// resolveAllEnvMarker returns the all-env marker for a v0 deployToAll: a literal true, or an
+// expression carried across unchanged for v1 to resolve at execution. Returns nil for an
+// absent or false flag, so no marker is emitted.
+func resolveAllEnvMarker(deployToAll *flexible.Field[bool]) interface{} {
 	if deployToAll == nil {
-		return false
+		return nil
 	}
-	val, ok := deployToAll.AsStruct()
-	return ok && val
+	if val, ok := deployToAll.AsStruct(); ok {
+		if val {
+			return true
+		}
+		return nil
+	}
+	if expr, ok := deployToAll.AsString(); ok {
+		return expr
+	}
+	return nil
 }
 
 // convertEnvironmentGroupEnvItems converts v0 Environment array to v1 EnvironmentItem array
@@ -571,7 +580,7 @@ func ConvertDeploymentInfrastructure(src *v0.DeploymentInfrastructure) *v1.Envir
 
 	// If infrastructure definition is specified, use its identifier
 	if src.InfrastructureDefinition.Identifier != "" {
-		envItem.AllInfra = false
+		envItem.AllInfra = nil
 		envItem.DeployTo = src.InfrastructureDefinition.Identifier
 	}
 
@@ -583,7 +592,7 @@ func ConvertDeploymentInfrastructure(src *v0.DeploymentInfrastructure) *v1.Envir
 // resolveEnvironmentDeployTo resolves the deploy-to value and the all-infra marker
 // for a v0 Environment.
 // Checks both singular infrastructureDefinition and plural infrastructureDefinitions.
-func resolveEnvironmentDeployTo(env *v0.Environment) (interface{}, bool) {
+func resolveEnvironmentDeployTo(env *v0.Environment) (interface{}, interface{}) {
 	infraDefs := collectInfraDefinitions(env)
 	return resolveDeployTo(env.DeployToAll, infraDefs)
 }
@@ -632,13 +641,14 @@ func hasValidInfraInputs(inputs interface{}) bool {
 }
 
 // resolveDeployTo determines the deploy-to value and the all-infra marker based on
-// DeployToAll and infrastructure definitions.
-// - If DeployToAll is a boolean true → sets the all-infra marker alongside the infra value
-// - If DeployToAll is <+input> → returns the infra value only (single string or list)
-// - If DeployToAll is any other expression → returns the infra value and logs a warning
-// - If DeployToAll is nil/false → returns the infra value
-// - If infrastructure has inputs, returns DeployToItem with overlay
-func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Field[[]*v0.InfrastructureDefinition]) (interface{}, bool) {
+// DeployToAll and infrastructure definitions. The marker is nil when there is nothing to
+// emit, and never false: see EnvironmentItem.AllInfra for why.
+//   - If DeployToAll is a boolean true → sets the all-infra marker alongside the infra value
+//   - If DeployToAll is an expression → carries the expression across as the marker, since v1's
+//     all-infra accepts one and resolves it at execution, alongside the infra value
+//   - If DeployToAll is nil/false → returns the infra value only
+//   - If infrastructure has inputs, returns DeployToItem with overlay
+func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Field[[]*v0.InfrastructureDefinition]) (interface{}, interface{}) {
 	// Compute infra value from infrastructure definitions
 	var infraValue interface{}
 	if infraDefs != nil {
@@ -693,7 +703,7 @@ func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Fiel
 	}
 
 	if deployToAll == nil {
-		return infraValue, false
+		return infraValue, nil
 	}
 
 	// Boolean value
@@ -703,25 +713,25 @@ func resolveDeployTo(deployToAll *flexible.Field[bool], infraDefs *flexible.Fiel
 			// infrastructures, which the deploy-to sibling preserves in v1.
 			return infraValue, true
 		}
-		return infraValue, false
+		return infraValue, nil
 	}
 
-	// Expression value
+	// Expression value: carried across unchanged. v1's all-infra accepts a runtime input or an
+	// expression and resolves it at execution, so dropping it here would silently turn "decide
+	// at execution" into "not all". The deploy-to sibling is kept alongside it, so the
+	// infrastructures authored in v0 survive whichever way the expression resolves.
 	if expr, ok := deployToAll.AsString(); ok {
-		if expr == "<+input>" {
-			// <+input> means deploy-to is the infra only
-			return infraValue, false
+		if expr != "<+input>" {
+			// Unlike <+input>, an arbitrary expression cannot be checked here - whether it
+			// yields a boolean is only known at execution.
+			messagelog.GetMessageLogger().LogWarning(
+				"UNSUPPORTED_EXPRESSION",
+				fmt.Sprintf("deployToAll contains expression %q; carried across as all-infra and must resolve to a boolean at runtime", expr),
+				messagelog.WithContext(map[string]string{"expression": expr, "field": "deployToAll"}),
+			)
 		}
-		// Other expression: the marker only honours a literal true, so the choice
-		// between all infrastructures and the listed ones cannot be deferred to
-		// runtime. Fall back to the listed infrastructures.
-		messagelog.GetMessageLogger().LogWarning(
-			"UNSUPPORTED_EXPRESSION",
-			fmt.Sprintf("deployToAll contains unsupported expression %q; falling back to the listed infrastructures", expr),
-			messagelog.WithContext(map[string]string{"expression": expr, "field": "deployToAll"}),
-		)
-		return infraValue, false
+		return infraValue, expr
 	}
 
-	return infraValue, false
+	return infraValue, nil
 }
